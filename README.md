@@ -160,15 +160,4 @@ Before running the pipeline, configure the following values in the corresponding
 - The training script is designed for parameter-efficient fine-tuning with LoRA/QLoRA.
 - For local or server-side deployment, you can connect the scripts to any compatible backend through `utils/llm_client.py`.
 
-## Citation
-
-If you use this repository, please cite our CoRE paper:
-
-```bibtex
-@article{zhong2026core,
-  title={Towards Human-like Social Media Simulation via Cognition-oriented Response Enhancement},
-  author={Zhong, Lin and Lin, Yaoxiong and Wang, Linzhi and Liao, Qing},
-  journal={ACM Transactions on Information Systems},
-  year={2026}
-}
 ```
