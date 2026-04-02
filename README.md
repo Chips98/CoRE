@@ -125,7 +125,7 @@ python core/stage1/step1_event_abstraction.py --model gpt-4o
 python core/stage1/step2_chain_extraction.py --dataset four_topics --model gpt-4o
 python core/stage1/step3_graph_construction.py --dataset four_topics --model gpt-4o
 python core/stage1/step4_ate_calculation.py --dataset four_topics
-python core/stage1/step5_ate_personalization.py --dataset four_topics --model gpt-5.2
+python core/stage1/step5_ate_personalization.py --dataset four_topics --model gpt-4o
 ```
 
 ### 2. Stage 2
