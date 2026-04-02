@@ -159,5 +159,3 @@ Before running the pipeline, configure the following values in the corresponding
 - The release focuses on the CoRE pipeline, data split, and prompt resources used in our experiments.
 - The training script is designed for parameter-efficient fine-tuning with LoRA/QLoRA.
 - For local or server-side deployment, you can connect the scripts to any compatible backend through `utils/llm_client.py`.
-
-```
