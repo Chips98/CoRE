@@ -120,10 +120,10 @@ async def main():
     parser.add_argument('--limit', type=int, default=None, help='小样本测试：限制处理的链条数量')
     args = parser.parse_args()
 
-    input_dir = project_root / f"cem/step1_ate_analysis/output/step_1"
+    input_dir = project_root / "core/step1_ate_analysis/output/step_1"
     input_file = input_dir / "step1_data_with_events.json"
 
-    output_dir = project_root / f"cem/step1_ate_analysis/output/step_2"
+    output_dir = project_root / "core/step1_ate_analysis/output/step_2"
     output_dir.mkdir(parents=True, exist_ok=True)
     output_file = output_dir / "causal_chains.json"
 

@@ -4,7 +4,6 @@
 
 import asyncio
 import json
-import os
 import sys
 import argparse
 from pathlib import Path
@@ -15,12 +14,22 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from utils.llm_client import LLMClient
+from utils.utils import load_data
 
-def load_data(data_path):
-    """加载数据"""
-    with open(data_path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-    return data
+
+def resolve_dataset_input_path(project_root: Path, dataset: str) -> Path:
+    """Support both nested and flat train-data layouts."""
+    candidates = [
+        project_root / f"data/{dataset}/train_data.json",
+        project_root / "data/train_data.json",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    raise FileNotFoundError(
+        f"Could not find train_data.json for dataset={dataset!r}. Checked: {candidates}"
+    )
 
 # ----------------------------------------------------------------------
 # Prompt 定义
@@ -117,8 +126,7 @@ async def main():
     args = parser.parse_args()
 
     # 1. 路径准备
-    data_dir = project_root / f"data/{args.dataset}"
-    input_file = data_dir / "train_data.json"
+    input_file = resolve_dataset_input_path(project_root, args.dataset)
 
     # 输出路径设置
     output_dir = project_root / f"core/step1_ate_analysis/output/step_1"

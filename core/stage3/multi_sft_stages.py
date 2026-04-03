@@ -7,16 +7,33 @@ Progressive Cognitive Internalization 训练脚本
 import os
 import sys
 import json
-import torch
 import argparse
 import logging
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
-from datasets import load_dataset, Dataset
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-from trl import SFTTrainer, SFTConfig, DataCollatorForCompletionOnlyLM
+OPTIONAL_IMPORT_ERROR = None
+
+try:
+    import torch
+    from datasets import Dataset
+    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    from peft import LoraConfig, PeftModel, prepare_model_for_kbit_training
+    from trl import SFTTrainer, SFTConfig, DataCollatorForCompletionOnlyLM
+except ImportError as exc:
+    OPTIONAL_IMPORT_ERROR = exc
+    torch = None
+    Dataset = None
+    AutoConfig = None
+    AutoModelForCausalLM = None
+    AutoTokenizer = None
+    BitsAndBytesConfig = None
+    LoraConfig = None
+    PeftModel = None
+    prepare_model_for_kbit_training = None
+    SFTTrainer = None
+    SFTConfig = None
+    DataCollatorForCompletionOnlyLM = None
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,6 +46,45 @@ def load_data(data_path: str) -> List[Dict[str, Any]]:
     with open(data_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
     return data
+
+
+def require_training_dependencies():
+    if OPTIONAL_IMPORT_ERROR is not None:
+        raise ImportError(
+            "Stage 3 training dependencies are missing. Install the packages in requirements.txt before running this script."
+        ) from OPTIONAL_IMPORT_ERROR
+
+
+def read_adapter_config(model_path: str) -> Dict[str, Any]:
+    adapter_config_path = Path(model_path) / "adapter_config.json"
+    if not adapter_config_path.exists():
+        return {}
+    with open(adapter_config_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def is_adapter_checkpoint(model_path: str) -> bool:
+    return (Path(model_path) / "adapter_config.json").exists()
+
+
+def resolve_model_config_path(model_path: str) -> str:
+    adapter_config = read_adapter_config(model_path)
+    return adapter_config.get("base_model_name_or_path", model_path)
+
+
+def resolve_tokenizer_path(model_path: str) -> str:
+    path = Path(model_path)
+    if path.exists() and (
+        (path / "tokenizer_config.json").exists()
+        or (path / "tokenizer.json").exists()
+        or (path / "special_tokens_map.json").exists()
+    ):
+        return model_path
+    return resolve_model_config_path(model_path)
+
+
+def should_create_new_lora_adapter(model_path: str) -> bool:
+    return not is_adapter_checkpoint(model_path)
 
 
 def infer_model_family(model_config, tokenizer) -> str:
@@ -214,6 +270,8 @@ def print_debug_info(tokenizer, sample_text: str, stage: int):
 # ==============================================================================
 
 def train_single_stage(args, stage: int, current_model_path: str):
+    require_training_dependencies()
+
     output_dir = os.path.join(args.output_dir, f"stage_{stage}")
     os.makedirs(output_dir, exist_ok=True)
 
@@ -224,8 +282,11 @@ def train_single_stage(args, stage: int, current_model_path: str):
     print("=" * 70)
 
     # 1. 加载 Tokenizer
-    model_config = AutoConfig.from_pretrained(current_model_path, trust_remote_code=True)
-    tokenizer = AutoTokenizer.from_pretrained(current_model_path, trust_remote_code=True, padding_side="right")
+    model_config_path = resolve_model_config_path(current_model_path)
+    tokenizer_path = resolve_tokenizer_path(current_model_path)
+
+    model_config = AutoConfig.from_pretrained(model_config_path, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True, padding_side="right")
     model_family = infer_model_family(model_config, tokenizer)
     added_new_pad_token = ensure_padding_token(tokenizer, model_family)
     logger.info(
@@ -262,7 +323,7 @@ def train_single_stage(args, stage: int, current_model_path: str):
     ) if args.use_qlora else None
 
     model = AutoModelForCausalLM.from_pretrained(
-        current_model_path,
+        model_config_path,
         quantization_config=bnb_config,
         trust_remote_code=True,
         device_map="auto"
@@ -275,16 +336,21 @@ def train_single_stage(args, stage: int, current_model_path: str):
     if args.use_qlora:
         model = prepare_model_for_kbit_training(model)
 
-    target_modules = get_lora_target_modules(model)
-    peft_config = LoraConfig(
-        r=args.lora_r,
-        lora_alpha=args.lora_alpha,
-        lora_dropout=args.lora_dropout,
-        target_modules=target_modules,
-        bias="none",
-        task_type="CAUSAL_LM"
-    )
-    logger.info("Using LoRA target modules: %s", target_modules)
+    peft_config = None
+    if args.use_lora and is_adapter_checkpoint(current_model_path):
+        model = PeftModel.from_pretrained(model, current_model_path, is_trainable=True)
+        logger.info("Resuming shared LoRA adapter from %s", current_model_path)
+    elif args.use_lora:
+        target_modules = get_lora_target_modules(model)
+        peft_config = LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            target_modules=target_modules,
+            bias="none",
+            task_type="CAUSAL_LM"
+        )
+        logger.info("Using new LoRA target modules: %s", target_modules)
 
     # 6. 配置训练参数 (加入防过拟合策略)
     training_args = SFTConfig(
@@ -322,7 +388,7 @@ def train_single_stage(args, stage: int, current_model_path: str):
     return output_dir
 
 def main():
-    parser = argparse.ArgumentParser(description="Multi-stage iCoT SFT Training")
+    parser = argparse.ArgumentParser(description="Multi-stage CoRE SFT Training")
     parser.add_argument("--data_path", type=str, required=True)
     parser.add_argument("--model_name_or_path", type=str, required=True)
     parser.add_argument("--output_dir", type=str, required=True)

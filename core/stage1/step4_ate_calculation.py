@@ -152,6 +152,23 @@ def calculate_dimension_ate(G, min_samples=3):
 
     return lookup_table
 
+
+def find_event_name_for_chain(graph, state_prev, state_curr, topic, chain_id):
+    """Resolve the event key for a specific chain inside a MultiDiGraph."""
+    fallback_event = "Unknown_Event"
+
+    if not graph.has_edge(state_prev, state_curr):
+        return fallback_event
+
+    for event_name, edge_data in graph[state_prev][state_curr].items():
+        if edge_data.get("topic") != topic:
+            continue
+        fallback_event = event_name
+        if chain_id in edge_data.get("raw_chains", []):
+            return event_name
+
+    return fallback_event
+
 def flatten_and_save_data(project_root, dataset, mode_lookup_full, chains, stage1_data):
     """扁平化数据"""
     print(f"\n开始数据扁平化...")
@@ -324,11 +341,13 @@ def main():
         )
         topic = chain.get('topic', 'Unknown')
 
-        event_name = "Unknown_Event"
-        for u, v, key, data in G.edges(keys=True, data=True):
-            if u == state_prev and v == state_curr and data.get('topic') == topic:
-                event_name = key
-                break
+        event_name = find_event_name_for_chain(
+            graph=G,
+            state_prev=state_prev,
+            state_curr=state_curr,
+            topic=topic,
+            chain_id=chain['chain_id'],
+        )
 
         # 匹配 Lookup Key
         lookup_key = f"[{topic}]_{str(state_prev)}::{event_name}"

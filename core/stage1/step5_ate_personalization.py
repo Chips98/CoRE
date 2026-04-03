@@ -4,7 +4,6 @@
 
 import asyncio
 import json
-import os
 import sys
 import argparse
 from pathlib import Path
@@ -14,6 +13,8 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from utils.llm_client import LLMClient
+
+FOUR_DIMENSIONS = ["Emotion", "Thinking", "Stance", "Intent"]
 
 DIMENSION_ADJUSTMENT_GUIDELINES = """
 1. **Emotion (情感)**:
@@ -57,7 +58,7 @@ def build_personalization_prompt(sample):
     }
     current_stance_label = stance_labels.get(topic, "不明确")
 
-    prompt = f"""你是一个社会认知科学专家。你的任务是根据用户的【心理归因】对【基准因果效应 (Base ATE)】进行微调，输出该样本个性化的 ATE 分数。
+    prompt = f"""你是一个社会认知科学专家。你的任务是根据用户的【心理归因】对【场景基准显著性分数】进行个体化校准，输出该样本的四维显著性分布。
 
 ---
 
@@ -92,33 +93,73 @@ def build_personalization_prompt(sample):
 ---
 
 ### [任务流程]
-1. **对比分析**：结合【触发事件】和【归因】，判断该用户的心理机制是否比同类场景下的平均水平更倾向于某种特定维度。
-2. **话题感知微调**：在【{topic}】话题背景下，考虑该维度在该话题中的特有强度。
-3. **分数微调**：在基准 ATE 基础上进行小幅微调（通常在 ±0.4000 之间）。
-4. **约束条件**：
-   - ATE 代表事件对维度发生的"提升贡献值"，通常在 [-1, 1] 之间。
-   - 如果基准分为 0 且 Rationale 中无明显证据支持该维度，请保持为 0 或极小值。
-   - 保持微调后的分数体现出该样本与"平均水平"的细微差别。
+1. **对比分析**：结合【触发事件】和【归因】，判断该用户在本轮更可能被哪个维度主导。
+2. **话题感知校准**：在【{topic}】话题背景下，考虑该维度在该话题中的特有强度。
+3. **显著性输出**：输出四个维度的显著性强度，范围为 [0, 1]。
+4. **归一化要求**：
+   - 四个维度都要给出非负数。
+   - 四个分数之和必须为 1.0（允许四舍五入误差）。
+   - 如果某一维度证据较弱，就给较低分数。
 
 ### [输出格式]
 直接输出 JSON，不要任何思考过程或解释。
 {{
-  "personalized_ate": {{
+  "salience_scores": {{
     "Emotion": 0.xxxx,
     "Thinking": 0.xxxx,
     "Stance": 0.xxxx,
-    "Intent": 0.xxxx,
-    "Other": 0.xxxx
+    "Intent": 0.xxxx
   }},
+  "dominant_dimension": "Emotion/Thinking/Stance/Intent",
   "adjustment_reason": "简述微调逻辑（100字以内）"
 }}
 """
     return prompt
 
+
+def normalize_salience_scores(raw_scores, dominant_dimension=None):
+    scores = {}
+    total = 0.0
+
+    for dim in FOUR_DIMENSIONS:
+        value = raw_scores.get(dim, 0.0)
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            value = 0.0
+        value = max(value, 0.0)
+        scores[dim] = value
+        total += value
+
+    if total <= 0:
+        if dominant_dimension in FOUR_DIMENSIONS:
+            return {
+                dim: round(0.7 if dim == dominant_dimension else 0.1, 4)
+                for dim in FOUR_DIMENSIONS
+            }
+        return {dim: 0.25 for dim in FOUR_DIMENSIONS}
+
+    return {dim: round(scores[dim] / total, 4) for dim in FOUR_DIMENSIONS}
+
+
+def infer_dominant_dimension(scores):
+    return max(FOUR_DIMENSIONS, key=lambda dim: scores.get(dim, 0.0))
+
+
+def fallback_salience_scores(sample):
+    return normalize_salience_scores(
+        sample.get('salience_scores', sample.get('ate_scores', {})),
+        sample.get('dominant_dimension'),
+    )
+
 async def personalize_sample(sem, llm_client, sample, pbar):
     async with sem:
         if sample.get('is_single_interaction') or not sample.get('has_ate_calculation'):
-            pass
+            sample['salience_scores'] = fallback_salience_scores(sample)
+            sample['dominant_dimension'] = infer_dominant_dimension(sample['salience_scores'])
+            sample['personalization_log'] = 'fallback_salience_for_sparse_sample'
+            pbar.update(1)
+            return sample
 
         try:
             prompt = build_personalization_prompt(sample)
@@ -128,11 +169,24 @@ async def personalize_sample(sem, llm_client, sample, pbar):
             end = response.rfind('}') + 1
             if start != -1 and end > start:
                 result = json.loads(response[start:end])
-                sample['ate_scores'] = result.get('personalized_ate', sample['ate_scores'])
+                raw_scores = result.get('salience_scores', {})
+                normalized_scores = normalize_salience_scores(
+                    raw_scores,
+                    result.get('dominant_dimension'),
+                )
+                sample['salience_scores'] = normalized_scores
+                sample['dominant_dimension'] = result.get(
+                    'dominant_dimension',
+                    infer_dominant_dimension(normalized_scores),
+                )
                 sample['personalization_log'] = result.get('adjustment_reason', 'LLM个性化')
             else:
+                sample['salience_scores'] = fallback_salience_scores(sample)
+                sample['dominant_dimension'] = infer_dominant_dimension(sample['salience_scores'])
                 sample['personalization_log'] = "JSON解析失败，保持基准"
         except Exception as e:
+            sample['salience_scores'] = fallback_salience_scores(sample)
+            sample['dominant_dimension'] = infer_dominant_dimension(sample['salience_scores'])
             sample['personalization_log'] = f"处理异常: {str(e)[:50]}"
         finally:
             pbar.update(1)
@@ -141,12 +195,12 @@ async def personalize_sample(sem, llm_client, sample, pbar):
 async def main():
     parser = argparse.ArgumentParser(description='Stage 5: ATE Personalization')
     parser.add_argument('--dataset', type=str, required=True, help='数据集名称')
-    parser.add_argument('--model', type=str, default='gpt4o', help='模型名称')
+    parser.add_argument('--model', type=str, default='gpt-5.2', help='模型名称')
     parser.add_argument('--concurrency', type=int, default=16, help='并发数')
     args = parser.parse_args()
 
-    input_path = project_root / f"cem/step1_ate_analysis/output/step_4/train_data_with_ate.json"
-    output_dir = project_root / f"cem/step1_ate_analysis/output/step_5"
+    input_path = project_root / "core/step1_ate_analysis/output/step_4/train_data_with_ate.json"
+    output_dir = project_root / "core/step1_ate_analysis/output/step_5"
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / "final_personalized_ate_data.json"
 
